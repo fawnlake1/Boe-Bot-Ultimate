@@ -1,0 +1,527 @@
+' =========================================================================
+'
+'   File....... Boe-Bot Ultimate Program v1-2.bs2
+'   Purpose.... Control for BOE-Bot
+'   Author..... Jeff Skinner
+'   Started.... 02/05/2012
+'   Updated.... 03/22/2018
+'
+'   {$STAMP BS2}
+'   {$PBASIC 2.5}
+'
+' =========================================================================
+
+' -----[ Program Description ]---------------------------------------------
+
+' Boe-Bot that can move around an area, detect objects and edges.
+' Uses; Standard Boe-Bot chassis
+'       Board of Education Rev C
+'       Ping))) Ultrasonic Sensor
+'       LCD AppMod
+'       SoundPAL Audio Processor
+
+' -----[ Revision History ]------------------------------------------------
+
+' v1.0 02/05/2012 - Initial code  
+' v1.1 03/22/2018 - Uploaded to Git
+
+' -----[ I/O Definitions ]-------------------------------------------------
+
+'P0
+EN           PIN 1     'AppMod LCD Enable Pin
+RW           PIN 2     'AppMod LCD R/W Pin
+RS           PIN 3     'AppMod LCD Register Select 0 = Instruction, 1 = Text
+'P4
+'P5
+'P6
+'P7
+'P8
+'P9
+SoundPal     PIN 10    'SoundPAL I/O pin
+Beeper       PIN 11    'Beeper I/O pin --- This is what I want to replace and remove!!!
+RightWheel   PIN 12    'Pin for the right servo motor
+LeftWheel    PIN 13    'Pin for the left servo motor
+HeadServo    PIN 14    'Pin for the servo used for turning the head from left to right
+PingSense    PIN 15    'Pin for triggering and reading from the ping sensor
+
+' -----[ Constants ]-------------------------------------------------------
+
+  MinDist       CON 12    'Adjust to be the closest Boe-Bot can be to an object before trying
+                          'to turn. Always add 1 to the value that you really want
+                          'NOTE: Boe-Bot may actually come a little closer, as it continues to move
+                          'while evaluating distance and determining whether or not to turn
+  E             CON 274   'E for East. Adjust so that Boe-Bot is at a 90 deg left head turn
+  W             CON 1150  'W for West. Adjust so that Boe-Bot is at a 90 deg right head turn
+  N             CON 704   'N for North. Adjust so that Boe-Bot is looking straight ahead
+  LEFT          CON 1     'Used to make comparisons between right and left head turning more readable
+  RIGHT         CON 0
+  StdDuration   CON 40    'Adjust for how far your bot moves forward or backward
+  PulseLow      CON 10    'Used to set the low time on the head servo rotation
+
+  LcdCls        CON $01   'clear the LCD
+  LcdHome       CON $02   'move cursor home
+  LcdCrsrL      CON $10   'move cursor left
+  LcdCrsrR      CON $14   'move cursor right
+  LcdDispL      CON $18   'shift chars left
+  LcdDispR      CON $1C   'shift chars right
+  LcdDDRam      CON $80   'Display DATA RAM control
+  LcdCGRam      CON $40   'Custom character RAM
+  LcdLine1      CON $80   'DDRAM address of line 1
+  LcdLine2      CON $C0   'DDRAM address of line 2
+
+  LcdWidth      CON 8     'chars in LCD line
+  LcdScrollTm   CON 250   'LCD scroll timing (ms)
+
+  NumLevels     CON 0     'program
+  NumPgms       CON 4     'number of programs
+
+  Pressed       CON 1     'buttons are active high
+
+' -----[ Variables ]-------------------------------------------------------
+
+    'AppMod LCD w/buttons A-D
+  BusDirs       VAR DIRB  'dirs for I/O redirection
+  BusOuts       VAR OUTB  'for output to LCD
+  BusIns        VAR INB   'input from LCD/buttons
+  char          VAR Byte  'Character To Send To LCD
+  index         VAR Word  'Character Pointer
+  inst          VAR char  'Instruction To Send To LCD
+  eeAddr        VAR Word  'ee address pointer
+  crsrPos       VAR Byte  'cursor position
+  scrWidth      VAR Nib   'scroll window width
+  idx1          VAR Byte  'loop counter
+  idx2          VAR Byte  'loop counter
+  buttons       VAR Nib
+  btnA          VAR buttons.BIT0  'Left-most BUTTON
+  btnB          VAR buttons.BIT1
+  btnC          VAR buttons.BIT2
+  btnD          VAR buttons.BIT3  'Right-most BUTTON
+  pgm           VAR Nib   'program selection
+  mnuLevel      VAR Nib   'menu level
+
+    'Ping))) Unit and motion
+  distInch      VAR Byte  'Calculated distance in inches
+  headDirection VAR Word  'Used to determine which direction head will be turned
+  headFlop      VAR Bit   'Flop back and forth for head direction
+  leftDist      VAR Byte  'Temp variable for distance to the left when scanning
+  pingDist      VAR Word  'Distance to finally be stored in microsecond reply time
+  pulseCount    VAR Word  'Used as a counter when operating servos
+  pulseDuration VAR Word  'Set how far to travel, if you change it for a forward,
+                          'before letting the program continue
+                          'or backward travel, you should set it back to the StdDuration
+  rightDist     VAR Byte  'Temp variable for distance to the right when scanning
+  scanCount     VAR Nib   'Used to count how many times stopped_scan has run so that
+                          'we can back up (probably in a corner)
+  setPulse      VAR Nib   'Used for modifying the pulse on 90 deg head turns.
+  temp          VAR Byte  'Temp Variable
+
+' -----[ EEPROM Data ]-----------------------------------------------------
+
+  LastPgm       DATA    0  'last pgm run
+
+  Banner        DATA    "   V1.2 BOE-BOT ", CR   'Banner Message To Send To LCD
+
+  Pgm1          DATA    "Normal  ", CR
+  Pgm2          DATA    "PING))) ", CR
+  Pgm3          DATA    "Clock   ", CR
+  Pgm4          DATA    "Stop    ", CR
+
+  Controls      DATA    0, " ", 1, "  ", 2, " ", 3, CR
+
+    'customer characters
+  UpArrow       DATA    $04, $0E, $15, $04, $04, $04, $04, $00
+  DnArrow       DATA    $04, $04, $04, $04, $15, $0E, $04, $00
+  Enter         DATA    $00, $01, $05, $09, $1F, $08, $04, $00
+  StopBtn       DATA    $00, $0E, $1F, $1B, $1F, $0E, $00, $00
+
+' -----[ Initialization ]--------------------------------------------------
+
+'  GOSUB DoReset 'Reset the SoundPAL I/O line and processor.
+
+Initialize:
+     DIRL = %11111110            'setup pins for LCD
+
+LCD_Init:
+     PAUSE 500                   'let the LCD settle
+     BusOuts = %0011             '8-bit mode
+     PULSOUT EN, 3 : PAUSE 5
+     PULSOUT EN, 3 : PAUSE 0
+     PULSOUT EN, 3 : PAUSE 0
+     BusOuts = %0010             '4-bit mode
+     PULSOUT EN, 3
+     char = %00101000            '2-line mode
+   GOSUB LCD_Command
+     char = %00001100            'no crsr, no blink
+   GOSUB LCD_Command
+     char = %00000110            'inc crsr, no disp shift
+   GOSUB LCD_Command
+
+Download_Chars:                  'download custom chars
+     char = LcdCGRam             'point to CG RAM
+   GOSUB LCD_Command             'prepare to write CG data
+     FOR idx1 = UpArrow TO (StopBtn + 7) 'build 4 custom chars
+     READ idx1, char             'get byte from EEPROM
+   GOSUB LCD_Write_Char          'put into LCD CG RAM
+   NEXT
+
+Intro:
+     char = LcdCls               'clear the LCD
+   GOSUB LCD_Command
+     PAUSE 400
+     crsrPos = LcdLine1          'start of scroll window
+     scrWidth = LcdWidth         'use full width of LCD
+     eeAddr = Banner             'point to message
+   GOSUB LCD_Scroll_String       'scroll it
+
+Setup:
+     READ LastPgm, pgm           'load last settings
+     pulseDuration = StdDuration 'Initialize the pulse duration for backward/forward
+
+' -----[ Program Code ]----------------------------------------------------
+
+  SEROUT SoundPal, $8000 + 84, ["=", 1, 125, 0, "!"]    'The 125 is a DEC code from the prestored SoundPAL HEX of $7D 'First Post (horse race bugle call)
+                                                        'Use http://easycalculation.com/hex-converter.php
+
+Main:
+   GOSUB Disp_Program
+   GOSUB Center_Head
+     PAUSE 150
+
+   GOSUB Check_Level             'Check buttons and set program level
+   GOSUB Active_Scan             'Enter scan mode
+
+  'Scanning Routines
+
+Active_Scan:
+     DO
+   GOSUB Get_Ping
+     IF(distInch < MinDist) THEN
+   GOSUB Stopped_Scan
+    ENDIF
+   GOSUB Go_Forward
+   GOSUB Head_Turn45: GOSUB Go_Forward: GOSUB Get_Ping
+   GOSUB Go_Forward
+   GOSUB Center_Head
+     headFlop = headFlop ^ 1   'Change head direction. If it was 0 now it's 1 vise a versa
+     IF(distInch < MinDist) THEN
+                               'Left is equal to 1, so the following evaluates true if it's
+                               'left, false otherwise
+     IF(headFlop) THEN GOSUB Go_Left45 ELSE GOSUB Go_Right45
+   ENDIF
+     LOOP
+  RETURN
+
+Stopped_Scan:
+     DO
+     IF(scanCount > 2) THEN
+     pulseDuration = 122
+   GOSUB Go_Backward
+     pulseDuration = StdDuration
+    ENDIF
+   GOSUB Alert
+     headDirection = W: GOSUB Head_Turn90: GOSUB Get_Ping: leftDist = distInch
+                                     'Turn left and get distance
+   GOSUB Center_Head
+     PAUSE 200
+     headDirection = E: GOSUB Head_Turn90: GOSUB Get_Ping: rightDist = distInch
+                                     'Turn right and get distance
+   GOSUB Center_Head
+     IF(leftDist < rightDist) THEN   'Compare the distances, and choose which way to turn
+   GOSUB Go_Right
+     ELSEIF(leftDist > rightDist) THEN
+   GOSUB Go_Left
+     ELSE                            'If the distances are equal backup and scan again
+   GOSUB Alert
+   GOSUB Alert
+     pulseDuration = 122
+   GOSUB Go_Backward
+     pulseDuration = StdDuration
+   GOSUB Stopped_Scan
+    ENDIF
+   GOSUB Get_Ping
+     scanCount = scanCount + 1
+     LOOP WHILE (distInch < MinDist)
+     scanCount = 0        'Reset scan count before returning to active scan so we don't
+                          ' start backing up the next time we come back to this subroutine!
+  RETURN
+
+' -----[ Subroutines ]-----------------------------------------------------
+
+  'Reset the SoundPAL.
+'DoReset:
+'      DO UNTIL SoundPal : LOOP 'Make sure SoundPAL is powered up.
+'    SEROUT SoundPal, reset, [0] 'Output 9 low bits at 1200 baud (i.e. a 7.5ms pulse).
+'  RETURN
+
+Alert:
+     FREQOUT Beeper, 250, 5000 - (distInch * 200) 'Frequency of beep is based on distance
+                                                  'from the object. Higher frequencies for closer,
+                                                  'lower frequencies for farther
+                                                  'This is what I want to replace with SoundPAL....
+  RETURN
+
+  'Display name of current program
+
+Show_Pgm:
+     char = LcdHome
+   GOSUB LCD_Command
+     LOOKUP pgm, [Pgm1, Pgm2, Pgm3, Pgm4], eeAddr  'get string address
+   GOSUB LCD_Put_String                            'print string
+  RETURN
+
+  'Ping and Head Subroutines
+
+Get_Ping:
+     LOW PingSense                 '1st step in starting ping
+     PULSOUT PingSense, 5          'Trigger is 10 microseconds (pulsout sends in 2u!)
+     PULSIN PingSense, 1, pingDist 'wait for ping to respond, and capture pulse width into pingDist
+     pingDist = pingDist */ $200   'convert to microseconds not sure how this works though
+     pingDist = pingDist / 2       'divide by 2 to account for trip there, and trip back
+     distInch = pingDist ** 889    'convert to inches
+         'DEBUG CLS, "Distance: "
+         'DEBUG CRSRXY, 10, 0, CLREOL, DEC distInch
+  RETURN
+
+Turn_Head45:                     'Must have headDirection set before this is called!
+     FOR pulseCount = 1 TO setPulse
+     PULSOUT HeadServo, headDirection
+     PAUSE PulseLow
+    NEXT
+  RETURN
+
+Center_Head:                     'Use PULSOUT 14, 750 to test for center
+     FOR pulseCount = 1 TO 5
+     PULSOUT HeadServo, N
+     PAUSE PulseLow
+    NEXT
+  RETURN
+
+Head_Turn90:                     'Must have headDirection set before this is called!
+     setPulse = 10
+   GOSUB Turn_Head45
+     setPulse = 10
+     PAUSE 200
+   GOSUB Turn_Head45
+     setPulse = 5
+  RETURN
+
+Head_Turn45:              'Uses headFlop to determine which direction to turn, not headDirection!
+     IF(headFlop) THEN      'Could compare to LEFT, but I think this is more efficient
+     headDirection = W
+     ELSE
+     headDirection = E
+     ENDIF
+   GOSUB Turn_Head45
+  RETURN
+
+  'Movement subroutines
+
+Go_Forward:                'Adjust the pulse width values so that your bot goes straight!
+     FOR pulseCount = 1 TO pulseDuration
+     PULSOUT RightWheel, 710
+     PULSOUT LeftWheel, 810
+    NEXT
+  RETURN
+
+Go_Backward:               'Adjust the pulse width values so that your bot goes straight!
+     FOR pulseCount = 1 TO pulseDuration
+     PULSOUT RightWheel, 850
+     PULSOUT LeftWheel, 685
+    NEXT
+    SEROUT SoundPal, $8000 + 84, ["=", 1, 229, 0, "!"]    'The 229 is a DEC code from the prestored SoundPAL HEX of $E5 'Uh oh!
+  RETURN
+
+Go_Left:                   'Adjust the pulseCount so that your bot turns left 90 degrees
+                           'FOR pulseCount = 1 TO 115
+                           '  PULSOUT RightWheel, 650
+                           '  PULSOUT LeftWheel, 650
+                           'NEXT
+   GOSUB Go_Left45
+   GOSUB Go_Left45
+  RETURN
+
+Go_Right:                  'Adjust the pulseCount so that your bot turns right 90 degrees
+                           'FOR pulseCount = 1 TO 95
+                           '  PULSOUT RightWheel, 850
+                           '  PULSOUT LeftWheel, 850
+                           'NEXT
+   GOSUB Go_Right45
+   GOSUB Go_Right45
+  RETURN
+
+Go_Right45:
+     FOR pulseCount = 1 TO (95 / 2)
+     PULSOUT RightWheel, 850
+     PULSOUT LeftWheel, 850
+    NEXT
+  RETURN
+
+Go_Left45:
+     FOR pulseCount = 1 TO (115 / 2)
+     PULSOUT RightWheel, 650
+     PULSOUT LeftWheel, 650
+    NEXT
+  RETURN
+
+  'LCD Subroutines
+    'Writes stored (in DATA statement) CR-terminated string to LCD
+    'position LCD cursor
+    'point to CR-terminated string (first location in 'eeAddr')
+
+LCD_Put_String:
+  DO
+    READ eeAddr, char
+    IF (char = CR) THEN EXIT
+    GOSUB LCD_Write_Char
+    eeAddr = eeAddr + 1
+  LOOP
+  RETURN
+
+  'Scroll a message across LCD line
+    'set starting position in 'crsrPos'
+    'set width of scrolling window in 'scrWidth'
+    'point to 0-terminated string (first location in 'eeAddr')
+    'strings should be padded with scrWidth spaces on each end
+
+LCD_Scroll_String:
+  DO
+    char = crsrPos                          'move To start of window
+    GOSUB LCD_Command
+    FOR idx2 = 0 TO (scrWidth - 1)          'write chars in window
+      READ (eeAddr + idx2), char
+      IF (char = CR) THEN EXIT              'stop if end of string
+      GOSUB LCD_Write_Char
+    NEXT
+    IF (char = CR) THEN EXIT
+    eeAddr = eeAddr + 1                     'scroll
+    PAUSE LcdScrollTm
+  LOOP
+  RETURN
+
+  'Send command to LCD
+    'put command byte in 'char'
+
+LCD_Command:                                'write command to LCD
+    LOW RS
+    GOTO LCD_Write_Char
+
+  'Write character to current cursor position
+    'but byte to write in 'char'
+
+LCD_Write_Char:                             'write character to LCD
+    BusOuts = char.HIGHNIB                  'output high nibble
+    PULSOUT EN, 3                            'strobe the Enable line
+    BusOuts = char.LOWNIB                   'output low nibble
+    PULSOUT EN, 3
+    HIGH RS                                 'return to character mode
+  RETURN
+
+  'Read and debounce the LCD AppMod buttons
+
+LCD_Get_Buttons:
+   BusDirs = %0000                           'make bus inputs
+   buttons = %1111                           'assume all pressed
+   FOR idx2 = 1 TO 10
+    buttons = buttons & BusIns               'make sure button held
+    PAUSE 5                                  'debounce 10 x 5 ms
+   NEXT
+   BusDirs = %1111                           'return bus to outputs
+  RETURN
+
+Stop_Pgm:
+    WRITE LastPgm, pgm                       'save settings
+    char = LcdCls
+   GOSUB LCD_Command
+   GOSUB Show_Pgm                            'display program
+    char = LcdLine2 + 4
+   GOSUB LCD_Command
+    BusDirs = %0000                          'give bus to buttons
+    DO WHILE (BusIns > %0000) : LOOP         'force button release
+    DO
+   GOSUB LCD_Get_Buttons                     'scan buttons
+    LOOP UNTIL (buttons > %0000)             'Until some input
+
+Disp_Program:
+     char = LcdHome
+   GOSUB LCD_Command
+     char = LcdLine2             'move to line 2
+   GOSUB LCD_Command
+     eeAddr = Controls
+   GOSUB LCD_Put_String          'display controls
+     RETURN
+
+Check_Level:
+     IF (mnuLevel = 0) THEN      'show pgm mode
+   GOSUB Show_Pgm
+     ENDIF
+
+     DO
+   GOSUB LCD_Get_Buttons         'scan buttons
+     LOOP UNTIL (buttons > %0000)   'Until some input
+
+  ' Process input
+  ' -- only one button is allowed
+  ' -- others are discarded
+
+     IF (btnD = Pressed) THEN Stop_Pgm     'Allow for a way to stop the drive motors
+     IF (btnC = Pressed) THEN
+       mnuLevel = mnuLevel + 1 // NumLevels    'next menu level
+   GOTO Clear_Buttons
+     ENDIF
+     IF (btnA = Pressed) THEN
+      SELECT mnuLevel
+      CASE 0
+        pgm = pgm + 1 // NumPgms             'next program
+'     CASE 1
+'        freq = freq // 20 + 1                'increase freq
+     ENDSELECT
+     GOTO Clear_Buttons
+     ENDIF
+
+'  IF (btnB = Pressed) THEN
+'    SELECT mnuLevel
+'      CASE 0
+'        pgm = pgm + (NumPgms - 1) // NumPgms    ' previous program
+'      CASE 1
+'        freq = freq - 1                         ' decrease freq
+'        IF (freq = 0) THEN freq = 20            ' rollunder
+'    ENDSELECT
+'    GOTO Clear_Buttons
+'  ENDIF
+'
+Clear_Buttons:
+     buttons = %0000
+     PAUSE 250                                     'auto-repeat delay
+   ' GOTO Check_Level
+
+'  '''' the following might be orphaned... was btnD 11/9
+'  Run_Program:
+'     WRITE LastPgm, pgm                            'save settings
+'
+'     char = LcdCls
+'    GOSUB LCD_Command
+'    GOSUB Show_Pgm                                'display program
+'     char = LcdLine2 + 4
+'    GOSUB LCD_Command
+'
+'     BusDirs = %0000                               'give bus to buttons
+'     DO WHILE (BusIns > %0000) : LOOP              'force button release
+'
+'  ' prep timers and run
+'  period = 1000 / freq                          'program period
+'  LOOKUP pgm, [M0, M1, M2, M3], eeAddr          'point to pattern
+'  READ eeAddr, LEDs                             'load first pattern
+'
+'  IF (pgm < 3) THEN
+'    timer1 = period / 2                         'on time
+'    timer2 = period - timer1                    'off time
+'    GOSUB Two_State
+'  ELSE
+'    states = 6                                  'eight states in chase
+'    timer1 = period / states                    'divide period
+'    GOSUB Multi_State
+'  ENDIF
+'    BusDirs = %1111                               'return bus to LCD
+  RETURN
+
+  'End of Code
